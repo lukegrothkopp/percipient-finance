@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+env/
+venv/
+
+# Streamlit & data
+.streamlit/secrets.toml
+.streamlit/**.yaml
+**/.DS_Store
+data/*
+!data/samples/**  # keep small demo files if you want
+
+# Jupyter (if you use notebooks)
+.ipynb_checkpoints/

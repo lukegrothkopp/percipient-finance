@@ -23,7 +23,7 @@ def page_icon_value():
     return str(LOGO_PATH) if LOGO_PATH.exists() else "📈"
 
 st.set_page_config(
-    page_title="Grothko Consulting's Business Intelligence Generator (BIG)",
+    page_title="Grothko Consulting - Percipient Finance Insights",
     page_icon=page_icon_value(),
     layout="wide",
     initial_sidebar_state="expanded"
@@ -940,7 +940,7 @@ with st.sidebar:
         st.warning("⚠️ Please enter your OpenAI API Key first")
 
 # ============== Header ==============
-st.markdown('<h1 class="main-header">Grothko Consulting Business Intelligence Generator</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">Grothko Consulting - Percipient Finance Insights</h1>', unsafe_allow_html=True)
 
 # ============== Page Routing (fixed) ==============
 page = st.session_state.get("page", "Dashboard")
@@ -967,9 +967,8 @@ if page == "Dashboard":
         st.info("👈 Please upload a dataset and enter your OpenAI API Key to get started.")
         st.markdown("""
         ### Getting Started
-        1. Create an API key at the OpenAI Platform
-        2. Enter the API key in the sidebar
-        3. Upload your CSV file
+        1. API key is already loaded in secrets ✔️
+        3. Upload your CSV file 
         4. Explore AI-powered insights!
         """)
 
@@ -1272,7 +1271,7 @@ elif page == "Visualizations":
 st.divider()
 st.markdown("""
 <div style='text-align: center; color: #666;'>
-    <p>Grothko Consulting B.I.G - Business Intelligence Generator</p>
+    <p>Grothko Consulting Percipient Finance AI Assistant</p>
 </div>
 """, unsafe_allow_html=True)
 

@@ -90,6 +90,13 @@ if 'page' not in st.session_state:
     st.session_state.page = "Dashboard"
 page = st.session_state.get("page", "Dashboard")
 
+# Session state additions
+
+if 'finance_mapping' not in st.session_state:
+    st.session_state.finance_mapping = {}  # canonical_field -> actual_df_column
+if 'mapping_confirmed' not in st.session_state:
+    st.session_state.mapping_confirmed = False
+
 # -------------------------
 # Helpers
 # -------------------------
@@ -112,6 +119,35 @@ def _find_col(df: pd.DataFrame, name: str):
         if 'pct' in s:
             alts.update({s.replace('pct','percent'), s.replace('pct','percentage'), s.replace('pct','perc')})
         return alts
+
+    FINANCE_CANONICAL_FIELDS = {
+        "date": ["date","order_date","invoice_date","transaction_date"],
+        "customer_id": ["customer","customer_id","cust_id"],
+        "vendor_id": ["vendor","vendor_id","supplier_id"],
+        "sku": ["sku","product_id","item_id"],
+        "quantity": ["quantity","qty","units","units_sold"],
+        "revenue": ["revenue","sales","net_revenue","net_sales","amount"],
+        "cogs": ["cogs","cost_of_goods_sold","cost"],
+        "op_ex": ["opex","operating_expense","expense"],
+        "invoice_due_date": ["due_date","invoice_due","terms_due"],
+        "invoice_paid_date": ["paid_date","payment_date","cash_date"],
+        "ar_amount": ["ar","accounts_receivable","ar_amount"],
+        "ap_amount": ["ap","accounts_payable","ap_amount"],
+        "inventory_value": ["inventory","inventory_value","stock_value"],
+        "cash_in": ["cash_in","collections","receipts"],
+        "cash_out": ["cash_out","disbursements","payments"],
+        # SaaS:
+        "contract_start": ["contract_start","start_date"],
+        "contract_end": ["contract_end","end_date","renewal_date"],
+        "mrr": ["mrr","monthly_recurring_revenue"],
+        "arr": ["arr","annual_recurring_revenue"],
+        "logo_id": ["logo_id","account_id","customer_id"],
+        "plan": ["plan","package","tier"],
+        "is_churned": ["churn","is_churned","churned"],
+        "is_expansion": ["expansion","upsell","add_on"],
+        "discount": ["discount","discount_pct","discount_percent"],
+        "s&m_expense": ["sales_marketing","sales_and_marketing","sm_expense"]
+    }
 
     # semantic aliases -> preferred df columns
     semantic_aliases = {
@@ -644,10 +680,20 @@ with st.sidebar:
                 with st.spinner("Setting up AI system..."):
                     if setup_rag_system(df, api_key):
                         st.success("🦾 AI system ready!")
+            if st.session_state.data_loaded:
+                with st.expander("🔧 Finance Field Mapping (optional but recommended)", expanded=False):
+                    df = st.session_state.df
+                    for canon, guesses in FINANCE_CANONICAL_FIELDS.items():
+                        default_guess = next((c for c in df.columns if c.lower().replace(" ","").replace("_","") in [g.replace("_","") for g in guesses]), None)
+                        choice = st.selectbox(f"Map **{canon}** to:", ["(none)"] + df.columns.tolist(), index=(df.columns.tolist().index(default_guess)+1) if default_guess in df.columns else 0, key=f"map_{canon}")
+                        st.session_state.finance_mapping[canon] = None if choice=="(none)" else choice
+                    st.session_state.mapping_confirmed = st.button("✅ Confirm Finance Mapping")
         except Exception as e:
             st.error(f"Error loading file: {e}")
     elif uploaded_file is not None and not api_key:
         st.warning("⚠️ Please enter your OpenAI API Key first")
+
+    
 
 # -------------------------
 # Main content
@@ -683,6 +729,195 @@ if page == "Dashboard":
         4. Explore AI-powered insights!
         """)
 
+# Finance KPI Engine Page
+import numpy as np
+import pandas as pd
+
+def _col(name):  # convenience
+    return st.session_state.finance_mapping.get(name)
+
+def _parse_dates(df, cols):
+    for c in cols:
+        if c and c in df.columns:
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+    return df
+
+def compute_dso(df):
+    # Needs: invoice_date, invoice_paid_date (or cash_in dates), ar_amount (or revenue)
+    inv = _col("date") or _col("invoice_date")
+    paid = _col("invoice_paid_date")
+    ar_amt = _col("ar_amount")
+    rev = _col("revenue")
+    if not inv or not (paid or ar_amt or rev):
+        return None, "Missing required fields for DSO."
+    df = df.copy()
+    _parse_dates(df, [inv, paid])
+    # proxy: average AR / (Revenue/365). If AR snapshot missing, approximate with invoice-age weighted by paid date
+    if ar_amt in df.columns and rev in df.columns:
+        avg_ar = df[ar_amt].mean(skipna=True)
+        total_rev = df[rev].sum(skipna=True)
+        dso = (avg_ar / (total_rev/365.0)) if total_rev else np.nan
+        return dso, None
+    if paid in df.columns:
+        mask = df[paid].notna() & df[inv].notna()
+        if mask.sum()==0: return None, "No paid vs. invoice dates to compute realized DSO."
+        durs = (df.loc[mask, paid] - df.loc[mask, inv]).dt.days
+        return durs.mean(), None
+    return None, "Insufficient data for DSO."
+
+def compute_dpo(df):
+    # Needs AP or vendor bills: date vs. paid date OR avg AP + COGS
+    inv = _col("date")
+    paid = _col("invoice_paid_date")
+    ap_amt = _col("ap_amount")
+    cogs = _col("cogs")
+    if ap_amt in df.columns and cogs in df.columns:
+        avg_ap = df[ap_amt].mean(skipna=True)
+        total_cogs = df[cogs].sum(skipna=True)
+        dpo = (avg_ap / (total_cogs/365.0)) if total_cogs else np.nan
+        return dpo, None
+    if inv and paid and inv in df.columns and paid in df.columns:
+        _parse_dates(df, [inv, paid])
+        mask = df[paid].notna() & df[inv].notna()
+        if mask.sum()==0: return None, "No paid vs. bill dates to compute realized DPO."
+        durs = (df.loc[mask, paid] - df.loc[mask, inv]).dt.days
+        return durs.mean(), None
+    return None, "Insufficient data for DPO."
+
+def compute_dio(df):
+    # Needs inventory_value + COGS
+    inv_val = _col("inventory_value")
+    cogs = _col("cogs")
+    if inv_val in df.columns and cogs in df.columns:
+        avg_inv = df[inv_val].mean(skipna=True)
+        total_cogs = df[cogs].sum(skipna=True)
+        dio = (avg_inv / (total_cogs/365.0)) if total_cogs else np.nan
+        return dio, None
+    return None, "Insufficient data for DIO."
+
+def compute_ccc(df):
+    dso, e1 = compute_dso(df)
+    dpo, e2 = compute_dpo(df)
+    dio, e3 = compute_dio(df)
+    if any(e is None for e in [e1,e2,e3]):  # at least some success
+        if None not in (dso,dpo,dio):
+            return (dso + dio - dpo), None
+    return None, "Insufficient data for full CCC."
+
+def gross_margin(df):
+    rev = _col("revenue"); cogs = _col("cogs")
+    if rev in df.columns and cogs in df.columns:
+        total_rev = df[rev].sum(skipna=True)
+        gm = (total_rev - df[cogs].sum(skipna=True))
+        return gm, (gm/total_rev*100 if total_rev else np.nan)
+    return None, None
+
+def contribution_margin_by(df, by):
+    rev = _col("revenue"); cogs = _col("cogs")
+    if not (rev in df.columns and cogs in df.columns and by in df.columns):
+        return None
+    gp = df.groupby(by).agg({rev:"sum", cogs:"sum"})
+    gp["gross_profit"] = gp[rev]-gp[cogs]
+    gp["gm_pct"] = np.where(gp[rev]!=0, gp["gross_profit"]/gp[rev]*100, np.nan)
+    return gp.sort_values("gross_profit", ascending=False)
+
+def vendor_pareto(df):
+    v = _col("vendor_id"); ap = _col("ap_amount")
+    if v in df.columns and ap in df.columns:
+        s = df.groupby(v)[ap].sum().sort_values(ascending=False)
+        s_pct = s.cumsum()/s.sum()*100 if s.sum()!=0 else s.cumsum()
+        return s, s_pct
+    return None, None
+
+# SaaS / subscription
+def churn_and_retention(df):
+    # minimal: needs logo_id and is_churned, else cohort logic can be added later
+    lid = _col("logo_id"); churn = _col("is_churned")
+    if lid in df.columns and churn in df.columns:
+        total = df[lid].nunique()
+        churned = df.loc[df[churn]==True, lid].nunique()
+        grr = (1 - churned/total)*100 if total else np.nan
+        return {"logos": total, "churned": churned, "GRR_pct": grr}
+    return None
+
+def ltv_simple(arpu, gross_margin_pct, months):
+    return arpu * (gross_margin_pct/100.0) * months
+
+def cac_payback_months(cac, arpu, gm_pct):
+    monthly_gp = arpu * (gm_pct/100.0)
+    return cac / monthly_gp if monthly_gp else np.nan
+
+def magic_number(delta_arr_quarter, prior_q_sm_expense):
+    return (delta_arr_quarter*4.0) / prior_q_sm_expense if prior_q_sm_expense else np.nan
+
+elif page == "Finance KPIs":
+    st.header("💼 Finance KPIs")
+    if not st.session_state.data_loaded:
+        st.warning("Upload a dataset first.")
+    elif not st.session_state.mapping_confirmed:
+        st.info("Open the sidebar ➜ Finance Field Mapping and click **Confirm** to enable calculations.")
+    else:
+        df = st.session_state.df
+        # Working capital
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            dso, e = compute_dso(df); st.metric("DSO (days)", f"{dso:.1f}" if dso is not None else "—")
+            if e: st.caption(f"Note: {e}")
+        with c2:
+            dpo, e = compute_dpo(df); st.metric("DPO (days)", f"{dpo:.1f}" if dpo is not None else "—")
+            if e: st.caption(f"Note: {e}")
+        with c3:
+            dio, e = compute_dio(df); st.metric("DIO (days)", f"{dio:.1f}" if dio is not None else "—")
+            if e: st.caption(f"Note: {e}")
+        with c4:
+            ccc, e = compute_ccc(df); st.metric("Cash Conversion Cycle", f"{ccc:.1f}" if ccc is not None else "—")
+            if e: st.caption(f"Note: {e}")
+
+        st.divider()
+        # Profitability
+        gp, gm_pct = gross_margin(df)
+        colA, colB = st.columns(2)
+        with colA:
+            st.metric("Gross Profit", f"{gp:,.0f}" if gp is not None else "—")
+        with colB:
+            st.metric("Gross Margin %", f"{gm_pct:.1f}%" if gm_pct is not None else "—")
+
+        # Contribution by customer/product if mapped
+        by_choice = st.selectbox("Contribution margin by:", ["(none)","customer_id","sku"])
+        if by_choice != "(none)" and _col(by_choice) in st.session_state.df.columns:
+            cm = contribution_margin_by(df, _col(by_choice))
+            if cm is not None:
+                st.subheader(f"Contribution margin by {_col(by_choice)}")
+                st.dataframe(cm.head(25))
+                try:
+                    fig = px.bar(cm.reset_index().head(15), x=_col(by_choice), y="gross_profit", title="Top Contribution")
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception:
+                    pass
+
+        st.divider()
+        # Vendor Pareto
+        s, s_pct = vendor_pareto(df)
+        if s is not None:
+            st.subheader("Vendor Concentration (Pareto)")
+            st.dataframe(pd.DataFrame({"AP_Amount": s, "Cum%": s_pct}).head(25))
+            try:
+                fig = px.line(s_pct.reset_index(), x=_col("vendor_id"), y=_col("vendor_id"), title="Pareto (cum%)")
+            except Exception:
+                # fallback simple line
+                fig = px.line(pd.DataFrame({"rank": range(1, len(s_pct)+1), "cum_pct": s_pct.values}), x="rank", y="cum_pct", title="Vendor Pareto (cum%)")
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.divider()
+        # SaaS quick stats (if available)
+        saas = churn_and_retention(df)
+        if saas:
+            st.subheader("SaaS Retention (basic)")
+            st.metric("Logos", saas["logos"])
+            st.metric("Churned", saas["churned"])
+            st.metric("GRR %", f"{saas['GRR_pct']:.1f}%")
+            st.caption("Add cohorts/NRR/expansion later if fields are available.")
+            
 # Data Analysis Page
 elif page == "Data Analysis":
     st.header("🛰️ Advanced Data Analysis")

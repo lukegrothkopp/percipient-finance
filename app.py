@@ -964,10 +964,10 @@ if page == "Dashboard":
         st.subheader("🗃️ Data Preview"); st.dataframe(df.head(10), use_container_width=True)
         st.subheader("💡 Quick Statistics"); st.dataframe(df.describe(), use_container_width=True)
     else:
-        st.info("👈 Please upload a dataset and enter your OpenAI API Key to get started.")
+        st.info("👈 Please upload a dataset to get started.")
         st.markdown("""
         ### Getting Started
-        1. API key is already loaded in secrets ✔️
+        1. API key is launch-ready 🚀️
         3. Upload your CSV file 
         4. Explore AI-powered insights!
         """)

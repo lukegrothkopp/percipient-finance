@@ -1111,7 +1111,7 @@ with st.sidebar:
 # =========================
 # Header
 # =========================
-st.markdown('<h1 class="main-header">Grothko Consulting Percipient AI Financial Analyst</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">Percipient AI Financial Analyst</h1>', unsafe_allow_html=True)
 
 # =========================
 # Page Routing
@@ -1427,6 +1427,6 @@ elif page == "Visualizations":
 st.divider()
 st.markdown("""
 <div style='text-align: center; color: #666;'>
-    <p>Grothko Consulting Percipipent Finance</p>
+    <p>Grothko Consulting - Percipient Finance</p>
 </div>
 """, unsafe_allow_html=True)

@@ -899,7 +899,7 @@ with st.sidebar:
                         st.success("🦾 AI system ready!")
 
             # Finance Field Mapping (persisted)  (Suggestion 5)
-            with st.expander("🔧 Finance Field Mapping (optional but recommended)", expanded=False):
+            with st.expander("🔧 Finance Field Mapping (optional)", expanded=False):
                 df = st.session_state.df
                 for canon, guesses in FINANCE_CANONICAL_FIELDS.items():
                     # Try persisted mapping first

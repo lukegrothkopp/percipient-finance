@@ -1,10 +1,10 @@
-# app.py — Percipient Finance (drop-in)
+# app.py — Percipient Finance 
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -14,8 +14,9 @@ import os
 import json
 from pathlib import Path
 
-# ============== Page configuration & logo ==============
-
+# =========================
+# Page configuration & logo
+# =========================
 REPO_DIR = Path(__file__).parent
 LOGO_PATH = REPO_DIR / "assets" / "header_logo.png"
 
@@ -23,13 +24,15 @@ def page_icon_value():
     return str(LOGO_PATH) if LOGO_PATH.exists() else "📈"
 
 st.set_page_config(
-    page_title="Grothko Consulting - Percipient Finance Insights",
+    page_title="Grothko Consulting's Business Intelligence Generator (BIG)",
     page_icon=page_icon_value(),
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ============== Custom CSS ==============
+# =========================
+# Custom CSS
+# =========================
 st.markdown("""
 <style>
 .main-header {
@@ -48,7 +51,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ============== API key loader ==============
+# =========================
+# API key loader
+# =========================
 def get_openai_api_key():
     """
     Precedence:
@@ -66,7 +71,9 @@ def get_openai_api_key():
             key = os.environ.get("OPENAI_API_KEY")
     return key
 
-# ============== Session State ==============
+# =========================
+# Session State
+# =========================
 if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
 if 'data_loaded' not in st.session_state:
@@ -88,8 +95,9 @@ if 'mapping_confirmed' not in st.session_state:
 if 'budget_df' not in st.session_state:
     st.session_state.budget_df = None
 
-# ============== Finance canonical fields (Suggestion 0) ==============
-# Canonical -> likely CSV column aliases
+# ===========================================
+# Finance canonical fields (Suggestion 0)
+# ===========================================
 FINANCE_CANONICAL_FIELDS = {
     "date": ["date","order_date","invoice_date","transaction_date","purchase_date"],
     "customer_id": ["customer","customer_id","cust_id","account_id"],
@@ -104,9 +112,10 @@ FINANCE_CANONICAL_FIELDS = {
     "ar_amount": ["ar","accounts_receivable","ar_amount"],
     "ap_amount": ["ap","accounts_payable","ap_amount"],
     "inventory_value": ["inventory","inventory_value","stock_value"],
-    "cash_in": ["cash_in","collections","receipts"],
-    "cash_out": ["cash_out","disbursements","payments"],
-    # SaaS:
+    "cash_in": ["cash_in","collections","receipts","inflows","cash_receipts"],
+    "cash_out": ["cash_out","disbursements","payments","outflows","cash_disbursements"],
+
+    # SaaS-ish / contracts:
     "contract_start": ["contract_start","start_date"],
     "contract_end": ["contract_end","end_date","renewal_date"],
     "mrr": ["mrr","monthly_recurring_revenue"],
@@ -118,13 +127,12 @@ FINANCE_CANONICAL_FIELDS = {
     "discount": ["discount","discount_pct","discount_percent"],
     "s&m_expense": ["sales_marketing","sales_and_marketing","sm_expense"],
 
-    # Extended keys (Suggestion 0):
+    # Extended keys:
     "unit_price": ["unit_price","price","avg_price","net_price","average_price"],
     "period": ["period","month","year_month","fiscal_period","ym","yyyy_mm"],
     "account": ["account","gl_account","budget_account","pnl_account"],
-    "amount": ["amount","value","usd_amount"]  # for Budget CSV
+    "amount": ["amount","value","usd_amount"]
 }
-
 MAPPING_STORE = REPO_DIR / ".if_mapping.json"
 
 # Attempt to load persisted mapping
@@ -136,17 +144,24 @@ try:
 except Exception:
     pass
 
-# ============== Helpers ==============
+# =========================
+# Helpers
+# =========================
 def _norm(s: str) -> str:
     return re.sub(r'[^a-z0-9]', '', str(s).lower())
 
 def _find_col(df: pd.DataFrame, name: str):
-    """Fuzzy/semantic matcher."""
+    """Fuzzy/semantic column matcher."""
     def alias_set(s: str):
         alts = {s}
         if 'percentage' in s:
             alts.update({s.replace('percentage','pct'), s.replace('percentage','percent')})
-    # ... (trimmed minor alias expansions for brevity)
+        if 'percent' in s:
+            alts.update({s.replace('percent','pct'), s.replace('percent','percentage')})
+        if 'perc' in s:
+            alts.update({s.replace('perc','pct'), s.replace('perc','percent'), s.replace('perc','percentage')})
+        if 'pct' in s:
+            alts.update({s.replace('pct','percent'), s.replace('pct','percentage'), s.replace('pct','perc')})
         return alts
 
     semantic_aliases = {
@@ -156,9 +171,11 @@ def _find_col(df: pd.DataFrame, name: str):
         'qty':          ['units','quantity','qty','unitssold','units_sold'],
         'date':         ['purchase_date','order_date','date','purchasedate','orderdate'],
         'customer':     ['customer_id','customerid','cust_id','custid','id'],
-        'state':        ['state','province','stateprovince','region'],
-        'country':      ['country','nation'],
         'discount':     ['discount_pct','discount','discountpercent','discountpercentage','pctdiscount'],
+        'department':   ['department','dept'],
+        'labor_cost':   ['labor_cost','labour_cost','payroll','wages'],
+        'hours':        ['hours','hrs'],
+        'period':       ['period','month','fiscal_period','ym','yyyy_mm'],
     }
     norm2actual = {_norm(c): c for c in df.columns}
     target = _norm(name)
@@ -167,36 +184,34 @@ def _find_col(df: pd.DataFrame, name: str):
     # exact/alias
     for ta in [target, *list(target_alts)]:
         if ta in norm2actual: return norm2actual[ta]
-
     # contains
     for ta in [target, *list(target_alts)]:
         for cn, actual in norm2actual.items():
             if ta in cn or cn in ta:
                 return actual
-
     # semantic
     concept_map = {
         'price': ['price','unitprice','avgprice','averageprice'],
         'revenue': ['revenue','netsales','sales','totalrevenue'],
         'quantity': ['quantity','qty','units'],
         'date': ['date','orderdate','purchasedate'],
-        'customer': ['customer','customerid','custid'],
-        'discount': ['discount','pct','percent'],
+        'department': ['department','dept'],
+        'labor_cost': ['labor','wages','payroll'],
+        'hours': ['hours','hrs'],
+        'period': ['period','month','fiscal'],
     }
-    hits = []
+    hits=[]
     for k,hints in concept_map.items():
-        if target==k or any(h in target for h in hints):
-            hits.append(k)
+        if target==k or any(h in target for h in hints): hits.append(k)
     seen=set(); hits=[h for h in hits if not (h in seen or seen.add(h))]
     for concept in hits:
         if concept in semantic_aliases:
             for cand in semantic_aliases[concept]:
-                cn = _norm(cand)
+                cn=_norm(cand)
                 if cn in norm2actual: return norm2actual[cn]
                 for nn, actual in norm2actual.items():
                     if cn in nn or nn in cn:
                         return actual
-
     # last resort
     for nn, actual in norm2actual.items():
         if any(tok in nn for tok in [target,*list(target_alts)]):
@@ -214,7 +229,9 @@ def _first_datetime_col(df: pd.DataFrame):
             continue
     return None
 
-# ============== Data summary for RAG ==============
+# =========================
+# Data summary for RAG
+# =========================
 def create_data_summary(df: pd.DataFrame) -> str:
     parts=[]
     parts.append(f"Dataset Overview: The dataset contains {len(df)} records and {df.shape[1]} columns.")
@@ -254,7 +271,9 @@ def create_data_summary(df: pd.DataFrame) -> str:
     parts.append(f"  - Data completeness: {completeness:.1f}%")
     return "\n".join(parts)
 
-# ============== RAG setup ==============
+# =========================
+# RAG setup
+# =========================
 def setup_rag_system(df: pd.DataFrame, api_key: str) -> bool:
     try:
         os.environ["OPENAI_API_KEY"]=api_key
@@ -280,7 +299,7 @@ Column Data Types and Info:
         st.session_state.llm=llm
         return True
     except Exception as e:
-        st.error(f"Error setting up RAG system: {e}")
+        st.error(f"Error setting up AI system: {e}")
         return False
 
 def answer_with_rag(question: str):
@@ -309,42 +328,26 @@ def answer_with_rag(question: str):
     except Exception as e:
         return f"Error generating response: {e}", source_docs
 
-# ============== Structured Analytics Engine ==============
-
+# =========================
+# Structured Analytics Engine
+# =========================
 def _resolve_condition_phrase(df: pd.DataFrame, phrase: str):
-    """
-    Infer a condition column + value/polarity from natural language like:
-      - "customers who recommend the books"
-      - "users who do not recommend"
-      - "coupon used = yes"
-      - "subscribers" / "subscription members"
-    Returns: (cond_col, explicit_value, polarity)
-      - cond_col: matched column name or None
-      - explicit_value: string value if explicitly provided (e.g., "yes"), else None
-      - polarity: "truthy" or "falsy" if implied (no explicit value)
-    """
     p_raw = phrase.strip()
     p = p_raw.lower()
 
-    # 0) Strip common leading noise that can bias matching to customer_id
     p = re.sub(r'^(customers?|users?|people)\s+(who|that|which)\s+', '', p).strip()
 
-    # 1) If there's an explicit equality, pull it out first.
-    #    Handles: '=', ' is ', ' equals '
     eq_match = re.search(r'(=| is | equals )\s*([^\s].+)$', p)
     explicit_value = None
     if eq_match:
         explicit_value = eq_match.group(2).strip().strip('"\'').lower()
         p = p[:eq_match.start()].strip()
 
-    # 2) Polarity hints for boolean-like columns
     falsy_hints = (" do not ", " don't ", " not ", " no ", " non ", " without ")
     polarity = "truthy"
     if any(h in f" {p} " for h in falsy_hints):
         polarity = "falsy"
 
-    # 3) HIGH-PRIORITY intent keywords → map directly to their likely columns first
-    #    These are predicate-like fields we *want* to pick for phrases like "who recommend".
     intent_priority = [
         ("recommend", ["recommend", "recommended", "recommends", "would recommend", "nps", "promoter"]),
         ("coupon",    ["coupon", "promo", "code", "discount code", "coupon used", "used coupon"]),
@@ -354,9 +357,7 @@ def _resolve_condition_phrase(df: pd.DataFrame, phrase: str):
         ("feedback",  ["feedback", "rating", "review", "satisfaction"]),
     ]
 
-    # helper to try a concept directly
     def _try_concept(concept: str):
-        # Reuse your alias matcher to resolve the column for a concept word
         col = _find_col(df, concept)
         return col
 
@@ -366,12 +367,10 @@ def _resolve_condition_phrase(df: pd.DataFrame, phrase: str):
             if col:
                 return col, explicit_value, polarity
 
-    # 4) If no priority concept matched, try the whole phrase → column
     col = _find_col(df, p)
     if col:
         return col, explicit_value, polarity
 
-    # 5) Token scan fallback (prefer longer tokens)
     tokens = re.findall(r'[a-z0-9_%]+', p)
     tokens_sorted = sorted(tokens, key=len, reverse=True)
     for tok in tokens_sorted:
@@ -379,7 +378,6 @@ def _resolve_condition_phrase(df: pd.DataFrame, phrase: str):
         if col:
             return col, explicit_value, polarity
 
-    # 6) Bigram fallback
     for i in range(len(tokens_sorted) - 1):
         bg = tokens_sorted[i] + " " + tokens_sorted[i + 1]
         col = _find_col(df, bg)
@@ -389,12 +387,6 @@ def _resolve_condition_phrase(df: pd.DataFrame, phrase: str):
     return None, explicit_value, polarity
 
 def _normalize_boolish(series: pd.Series) -> pd.Series:
-    """
-    Return a Series of strings normalized to boolean-like categories:
-      - truthy set: {'1','true','t','yes','y','recommended','recommend','member','used'}
-      - falsy set:  {'0','false','f','no','n','notrecommended','dontrecommend','do_not_recommend','unused'}
-    Non-matching values are returned as lower-cased strings (so we can still do explicit equality if needed).
-    """
     s = series.astype(str).str.lower().str.strip()
     truthy = {'1','true','t','yes','y','recommended','recommend','member','used'}
     falsy  = {'0','false','f','no','n','notrecommended','dontrecommend','do_not_recommend','unused'}
@@ -413,7 +405,7 @@ def handle_analytics_query(question: str, df: pd.DataFrame):
     """
     q = question.lower().strip()
 
-    # -------- New: "correlation matrix" on numeric columns --------
+    # --- Correlation matrix on numeric columns ---
     if "correlation matrix" in q or "corr matrix" in q or re.search(r"\bheat\s*map\b.*corr", q):
         num_df = df.select_dtypes(include=[np.number])
         if num_df.shape[1] < 2:
@@ -428,26 +420,23 @@ def handle_analytics_query(question: str, df: pd.DataFrame):
             pass
         return True, f"Computed a correlation matrix across {num_df.shape[1]} numeric columns."
 
-    # -------- New: hours vs labor_cost by department --------
+    # --- Hours vs labor_cost by department ---
     if ("hours" in q and ("labor" in q or "labour" in q)) and ("department" in q or "across" in q):
-        # Resolve columns via your fuzzy matcher
         hours_col = _find_col(df, "hours")
         labor_col = _find_col(df, "labor_cost") or _find_col(df, "labour_cost")
         dept_col  = _find_col(df, "department")
         missing = [name for name, col in [("hours", hours_col), ("labor_cost", labor_col), ("department", dept_col)] if not col or col not in df.columns]
         if missing:
             msg = ("I couldn't find the required columns: " + ", ".join(missing) +
-                   ". For this analysis, load the staffing file (e.g., 'staffing_payroll_events.csv') "
-                   "so I can use columns: hours, labor_cost, department.")
+                   ". Load a staffing dataset (e.g., 'staffing_payroll_events.csv') "
+                   "with columns: hours, labor_cost, department.")
             return True, msg
 
-        # Overall Pearson
         x = pd.to_numeric(df[hours_col], errors='coerce')
         y = pd.to_numeric(df[labor_col], errors='coerce')
         valid = x.notna() & y.notna()
         overall = x[valid].corr(y[valid], method='pearson') if valid.sum() >= 3 else np.nan
 
-        # By department
         out_rows = []
         for dept, g in df.loc[valid, [dept_col, hours_col, labor_col]].groupby(dept_col):
             gx = pd.to_numeric(g[hours_col], errors='coerce')
@@ -460,7 +449,6 @@ def handle_analytics_query(question: str, df: pd.DataFrame):
         st.subheader("Hours vs Labor Cost — Department Correlations")
         st.dataframe(res)
 
-        # Quick scatter for top department (if enough points)
         try:
             top = res.dropna(subset=["pearson_r"]).head(1)
             if not top.empty:
@@ -476,7 +464,7 @@ def handle_analytics_query(question: str, df: pd.DataFrame):
                "Not enough overlapping numeric values to compute overall correlation.")
         return True, msg
 
-    # -------- Existing: correlation between X and Y --------
+    # --- Correlation between X and Y ---
     m = re.search(r'correlat\w*\s+.*\bbetween\b\s+(.+?)\s+\b(and|&)\b\s+(.+)', q)
     if m:
         raw_x = m.group(1); raw_y = m.group(3)
@@ -499,7 +487,7 @@ def handle_analytics_query(question: str, df: pd.DataFrame):
             pass
         return True, msg
 
-    # -------- Existing explicit Pearson pattern --------
+    # --- Explicit Pearson request ---
     m2 = re.search(r'(pearson|corr(?!elation)\b).*?(between|for)\s+[\'"]?([\w %_]+)[\'"]?\s+(and|,)\s+[\'"]?([\w %_]+)[\'"]?', q)
     if m2:
         raw_x = m2.group(3); raw_y = m2.group(5)
@@ -522,7 +510,7 @@ def handle_analytics_query(question: str, df: pd.DataFrame):
             pass
         return True, msg
 
-    # --- Conditional average/mean: natural language friendly ---
+    # --- Conditional average ---
     m_avg = re.search(
         r'\b(average|avg|mean)\b\s+(of\s+|for\s+)?(?P<metric>[\w %_]+?)\s+(among|for|where)\s+(?P<condphrase>.+)$',
         q
@@ -541,19 +529,16 @@ def handle_analytics_query(question: str, df: pd.DataFrame):
             return True, (f"I couldn't resolve the condition column from: `{cond_phrase}`.\n"
                           f"Columns: {list(df.columns)}")
 
-        # Build filter
         raw_series = df[cond_col]
         norm_series = _normalize_boolish(raw_series)
 
         if explicit_val:
-            # explicit string equality (post-normalization)
             target = explicit_val.lower().strip()
             cond_mask = norm_series.eq(target) | raw_series.astype(str).str.lower().str.strip().eq(target)
         else:
             flag = '___truthy___' if polarity == 'truthy' else '___falsy___'
             cond_mask = norm_series.eq(flag)
 
-            # If nothing matched: try booleans or 0/1 numerics directly
             if not cond_mask.any():
                 if raw_series.dtype == bool:
                     cond_mask = raw_series.fillna(False) if polarity == "truthy" else ~raw_series.fillna(False)
@@ -583,8 +568,8 @@ def handle_analytics_query(question: str, df: pd.DataFrame):
             pass
 
         return True, msg
-        
-    # --- "top 3 insights" ---
+
+    # --- "Top 3 insights" ---
     if re.search(r'\btop\s*3\s*insight', q):
         insights=[]
         num_df=df.select_dtypes(include=[np.number])
@@ -607,7 +592,7 @@ def handle_analytics_query(question: str, df: pd.DataFrame):
         msg="### Top 3 Insights\n" + "\n".join([f"{i+1}. {insights[i]}" for i in range(min(3,len(insights)))])
         return True, msg
 
-    # --- "trends or patterns" ---
+    # --- "Trends or patterns" ---
     if re.search(r'\btrends?\b|\bpatterns?\b', q):
         bullets=[]
         num_df=df.select_dtypes(include=[np.number])
@@ -641,11 +626,10 @@ def handle_analytics_query(question: str, df: pd.DataFrame):
         return True, msg
 
     return False, ""
-# >>> END: Structured Analytics <<<
 
-# -----------------------
-# Finance KPI Engine (existing baseline)
-# -----------------------
+# =========================
+# Finance KPI Engine helpers
+# =========================
 def _col(name):  # convenience
     return st.session_state.finance_mapping.get(name)
 
@@ -705,9 +689,9 @@ def compute_dio(df):
     return None, "Insufficient data for DIO."
 
 def compute_ccc(df):
-    dso, e1 = compute_dso(df)
-    dpo, e2 = compute_dpo(df)
-    dio, e3 = compute_dio(df)
+    dso, _ = compute_dso(df)
+    dpo, _ = compute_dpo(df)
+    dio, _ = compute_dio(df)
     if None not in (dso,dpo,dio):
         return (dso + dio - dpo), None
     return None, "Insufficient data for full CCC."
@@ -756,36 +740,64 @@ def cac_payback_months(cac, arpu, gm_pct):
 def magic_number(delta_arr_quarter, prior_q_sm_expense):
     return (delta_arr_quarter*4.0) / prior_q_sm_expense if prior_q_sm_expense else np.nan
 
-# -----------------------
-# Optional-but-powerful features (Suggestions 1-4)
-# -----------------------
-
-# (1) 13-week cash view
+# =========================
+# Optional-but-powerful features
+# =========================
+# (Patched) 13-week cash view
 def weekly_13_week_cash(df, opening_cash=0.0, min_cash_threshold=0.0):
-    dt = _col("date"); ci = _col("cash_in"); co = _col("cash_out")
-    if not dt or dt not in df.columns or not (ci in df.columns or co in df.columns):
-        return None, "Map at least 'date' and one of 'cash_in' or 'cash_out' to compute 13-week cash."
+    dt = _col("date") or _find_col(df, "date")
+    ci = _col("cash_in")
+    co = _col("cash_out")
+
+    if not dt or dt not in df.columns:
+        return None, "Map a valid 'date' column to compute 13-week cash."
+
     w = df.copy()
     _parse_dates(w, [dt])
-    if ci not in w.columns: w[ci] = 0.0
-    if co not in w.columns: w[co] = 0.0
-    # bucket by Mon
-    w["week"] = w[dt] - w[dt].dt.weekday.astype("timedelta64[D]")
-    agg = w.groupby("week").agg(
-        cash_in=(ci,"sum"),
-        cash_out=(co,"sum")
-    ).sort_index()
-    agg["net"] = agg["cash_in"] - agg["cash_out"]
-    agg["ending_cash"] = opening_cash + agg["net"].cumsum()
-    agg["flag_low_cash"] = agg["ending_cash"] < float(min_cash_threshold)
-    # show the most recent 13 weeks window anchored at current week
-    start = pd.Timestamp.today().normalize() - pd.to_timedelta(pd.Timestamp.today().weekday(), unit="D")
-    future = agg[agg.index >= start]
-    past = agg[agg.index < start].tail(3)  # small context
-    agg = pd.concat([past, future]).head(13)
-    return agg, None
 
-# (2) BvA + forecast error
+    # Fallbacks: if user didn't map, try to infer
+    if not ci or ci not in w.columns:
+        w["__cash_in__"] = 0.0
+        ci = "__cash_in__"
+    if not co or co not in w.columns:
+        guess = _find_col(w, "labor_cost")
+        if guess and guess in w.columns:
+            co = guess
+        else:
+            w["__cash_out__"] = 0.0
+            co = "__cash_out__"
+
+    # Coerce to numeric
+    w[ci] = pd.to_numeric(w[ci], errors="coerce").fillna(0.0)
+    w[co] = pd.to_numeric(w[co], errors="coerce").fillna(0.0)
+
+    if (w[ci].sum() == 0) and (w[co].sum() == 0):
+        return None, "No numeric cash_in/cash_out values found. Map 'cash_out' to a numeric column (e.g., labor_cost) or load a cash ledger."
+
+    # Week bucketing (Mon-start)
+    try:
+        w["week"] = w[dt].dt.to_period("W-MON").apply(lambda p: p.start_time)
+    except Exception:
+        w["week"] = w[dt] - w[dt].dt.weekday.astype("timedelta64[D]")
+
+    agg = w.groupby("week").agg(
+        cash_in=(ci, "sum"),
+        cash_out=(co, "sum"),
+    ).sort_index()
+
+    agg["net"] = agg["cash_in"] - agg["cash_out"]
+    agg["ending_cash"] = float(opening_cash) + agg["net"].cumsum()
+    agg["flag_low_cash"] = agg["ending_cash"] < float(min_cash_threshold)
+
+    # Show context: last 3 past weeks + upcoming weeks, max 13 rows
+    today_monday = pd.Timestamp.today().normalize() - pd.to_timedelta(pd.Timestamp.today().weekday(), unit="D")
+    future = agg[agg.index >= today_monday]
+    past = agg[agg.index < today_monday].tail(3)
+    out = pd.concat([past, future]).head(13)
+
+    return out, None
+
+# BvA + forecast error
 def join_budget_actuals(actuals_df, budget_df):
     per = _col("period"); acc = _col("account"); amt = _col("amount")
     dt  = _col("date"); rev = _col("revenue"); cogs = _col("cogs"); opx = _col("op_ex")
@@ -841,7 +853,7 @@ def forecast_error_metrics(df_period_vs, group_by_account=True):
         wape = df["abs_err"].sum()/df["abs_act"].sum()*100 if df["abs_act"].sum()!=0 else np.nan
         return pd.DataFrame({"MAPE":[mape],"WAPE":[wape]})
 
-# (3) PVM waterfall
+# PVM waterfall (needs sku/quantity/unit_price/period in dataset to run)
 def pvm_decomposition(df, period_a, period_b):
     sku = _col("sku"); qty = _col("quantity"); price = _col("unit_price") or _find_col(df,"price"); per = _col("period")
     if not all([sku, qty, price, per]) or any(c not in df.columns for c in [sku, qty, price, per]):
@@ -869,7 +881,7 @@ def pvm_decomposition(df, period_a, period_b):
     out["Delta"] = out["Value"].diff()
     return out, None
 
-# (4) SaaS cohorts & NRR
+# Cohorts & NRR (sponsor-as-logo model if you expand by month)
 def cohort_table_nrr(df):
     lid = _col("logo_id") or _col("customer_id")
     dt  = _col("date")
@@ -911,7 +923,102 @@ def overall_retention_curves(df):
         nrr.append({"month": cur, "NRR": nrr_base*100})
     return pd.DataFrame(grr), pd.DataFrame(nrr), None
 
-# ============== Sidebar ==============
+# =========================
+# Multi-file unify helpers
+# =========================
+def _ensure_period(df, date_col="date"):
+    df = df.copy()
+    if "period" not in df.columns and date_col in df.columns:
+        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+        df["period"] = df[date_col].dt.to_period("M").astype(str)
+    return df
+
+def expand_sponsorships_monthly(spon_df):
+    # expects: logo_id, contract_start, contract_end, mrr
+    spon_df = spon_df.copy()
+    if "contract_start" not in spon_df.columns or "contract_end" not in spon_df.columns:
+        return pd.DataFrame(columns=["date","period","revenue","cogs","op_ex"])
+    spon_df["contract_start"] = pd.to_datetime(spon_df["contract_start"], errors="coerce")
+    spon_df["contract_end"]   = pd.to_datetime(spon_df["contract_end"], errors="coerce")
+    rows = []
+    for _, r in spon_df.iterrows():
+        if pd.isna(r["contract_start"]) or pd.isna(r["contract_end"]): 
+            continue
+        start_p = r["contract_start"].to_period("M")
+        end_p   = r["contract_end"].to_period("M")
+        ym = pd.period_range(start_p, end_p, freq="M")
+        for p in ym.astype(str):
+            rows.append({"date": pd.Period(p).to_timestamp("M"), "period": p,
+                         "logo_id": r.get("logo_id"), "mrr": r.get("mrr", 0), "revenue": r.get("mrr", 0)})
+    return pd.DataFrame(rows)
+
+def assemble_unified_ledger(file_objs):
+    """Build a monthly ledger (date, period, revenue, cogs, op_ex) by recognizing schemas."""
+    parts = []
+    for f in file_objs:
+        try:
+            df = pd.read_csv(f)
+        except Exception:
+            continue
+        cols = set(c.lower() for c in df.columns)
+
+        # actuals_transactions.csv
+        if {"date","period","revenue","cogs","op_ex"}.issubset(cols):
+            df = _ensure_period(df, "date")
+            parts.append(df[["date","period","revenue","cogs","op_ex"]])
+
+        # department_opex_monthly.csv
+        elif {"department","opex_amount"}.issubset(cols) and "period" in cols:
+            out = df.groupby("period", as_index=False)["opex_amount"].sum().rename(columns={"opex_amount":"op_ex"})
+            out["date"] = pd.PeriodIndex(out["period"], freq="M").to_timestamp("M")
+            out["revenue"] = 0; out["cogs"] = 0
+            parts.append(out[["date","period","revenue","cogs","op_ex"]])
+
+        # sponsorships.csv -> monthly revenue
+        elif {"logo_id","contract_start","contract_end","mrr"}.issubset(cols):
+            out = expand_sponsorships_monthly(df)
+            if not out.empty:
+                out["cogs"] = 0; out["op_ex"] = 0
+                parts.append(out[["date","period","revenue","cogs","op_ex"]])
+
+        # pos_food_beverage.csv
+        elif {"event_id","date","outlet","sales_amount","cogs_amount"}.issubset(cols):
+            df = _ensure_period(df, "date")
+            g = df.groupby("period", as_index=False).agg(revenue=("sales_amount","sum"), cogs=("cogs_amount","sum"))
+            g["date"] = pd.PeriodIndex(g["period"], freq="M").to_timestamp("M"); g["op_ex"]=0
+            parts.append(g[["date","period","revenue","cogs","op_ex"]])
+
+        # merchandise_sales.csv
+        elif {"event_id","date","stand","sales_amount","cogs_amount"}.issubset(cols):
+            df = _ensure_period(df, "date")
+            g = df.groupby("period", as_index=False).agg(revenue=("sales_amount","sum"), cogs=("cogs_amount","sum"))
+            g["date"] = pd.PeriodIndex(g["period"], freq="M").to_timestamp("M"); g["op_ex"]=0
+            parts.append(g[["date","period","revenue","cogs","op_ex"]])
+
+        # staffing_payroll_events.csv (treat as opex)
+        elif {"event_id","date","department","hours","labor_cost"}.issubset(cols):
+            df = _ensure_period(df, "date")
+            g = df.groupby("period", as_index=False).agg(op_ex=("labor_cost","sum"))
+            g["date"] = pd.PeriodIndex(g["period"], freq="M").to_timestamp("M")
+            g["revenue"]=0; g["cogs"]=0
+            parts.append(g[["date","period","revenue","cogs","op_ex"]])
+
+        else:
+            # Fallback: ignore (or could attempt auto-map)
+            pass
+
+    if not parts:
+        return None
+    uni = pd.concat(parts, ignore_index=True)
+    uni = uni.groupby(["period"], as_index=False).agg({
+        "revenue":"sum","cogs":"sum","op_ex":"sum"
+    })
+    uni["date"] = pd.PeriodIndex(uni["period"], freq="M").to_timestamp("M")
+    return uni[["date","period","revenue","cogs","op_ex"]]
+
+# =========================
+# Sidebar
+# =========================
 with st.sidebar:
     if LOGO_PATH.exists():
         st.sidebar.image(str(LOGO_PATH), width=150)
@@ -920,7 +1027,6 @@ with st.sidebar:
 
     st.title("Navigation")
 
-    # Navigation list now includes Finance KPIs
     pages = ["Dashboard", "Finance KPIs", "Data Analysis", "AI Assistant", "Visualizations"]
     current_index = pages.index(st.session_state.page) if st.session_state.page in pages else 0
     selection = st.radio("Select Page:", pages, index=current_index)
@@ -935,14 +1041,14 @@ with st.sidebar:
     else:
         st.info("ℹ️ Store your key in Streamlit Secrets as `OPENAI_API_KEY` (or `openai.api_key`).")
 
-    # Data upload
+    # Multi-file uploader (unified ledger)
     st.subheader("🗄️ Data Upload")
-    uploaded_file = st.file_uploader(
-        "Upload your dataset (CSV)", type=['csv'],
-        help="Upload a CSV file containing your business data"
+    uploaded_files = st.file_uploader(
+        "Upload one or more datasets (CSV)", type=['csv'], accept_multiple_files=True,
+        help="Upload actuals, POS, merch, sponsorships, department opex, staffing, etc."
     )
 
-    # Budget upload (Suggestion 2)
+    # Budget upload (for BvA)
     with st.expander("📥 Budget Upload (for BvA)", expanded=False):
         budget_file = st.file_uploader("Upload Budget CSV", type=["csv"], key="budget_csv")
         if budget_file is not None:
@@ -952,62 +1058,64 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Failed to read budget CSV: {e}")
 
-    if uploaded_file is not None and api_key:
-        try:
-            df = pd.read_csv(uploaded_file)
-            st.session_state.df = df
+    # Build unified ledger if any files were provided
+    if uploaded_files:
+        unified = assemble_unified_ledger(uploaded_files)
+        if unified is not None and not unified.empty:
+            st.session_state.df = unified
             st.session_state.data_loaded = True
-            st.success(f"☑️ Data loaded: {df.shape[0]} rows, {df.shape[1]} columns")
-            if st.session_state.vectorstore is None:
+            st.success(f"Unified dataset built: {unified.shape[0]} rows × {unified.shape[1]} columns")
+            # Set up RAG once
+            if st.session_state.vectorstore is None and api_key:
                 with st.spinner("Setting up AI system..."):
-                    if setup_rag_system(df, api_key):
+                    if setup_rag_system(unified, api_key):
                         st.success("🦾 AI system ready!")
+        else:
+            st.info("Uploaded files recognized, but nothing unified. Try loading a known schema (e.g., actuals, POS, merch, sponsorships, department opex, staffing).")
 
-            # Finance Field Mapping (persisted)  (Suggestion 5)
-            with st.expander("🔧 Finance Field Mapping (optional)", expanded=False):
-                df = st.session_state.df
-                for canon, guesses in FINANCE_CANONICAL_FIELDS.items():
-                    # Try persisted mapping first
-                    persisted = st.session_state.finance_mapping.get(canon)
-                    default_guess = None
-                    # find a reasonable default if not persisted
-                    if not persisted:
-                        for c in df.columns:
-                            normc = c.lower().replace(" ","").replace("_","")
-                            if normc in [g.replace("_","") for g in guesses]:
-                                default_guess = c
-                                break
-                    options = ["(none)"] + df.columns.tolist()
-                    preselect = 0
-                    if persisted and persisted in df.columns:
-                        preselect = options.index(persisted)
-                    elif default_guess and default_guess in df.columns:
-                        preselect = options.index(default_guess)
-                    choice = st.selectbox(
-                        f"Map **{canon}** to:",
-                        options,
-                        index=preselect,
-                        key=f"map_{canon}"
-                    )
-                    st.session_state.finance_mapping[canon] = None if choice=="(none)" else choice
+    # Finance Field Mapping (persisted)
+    if st.session_state.data_loaded:
+        with st.expander("🔧 Finance Field Mapping (optional but recommended)", expanded=False):
+            df = st.session_state.df
+            for canon, guesses in FINANCE_CANONICAL_FIELDS.items():
+                persisted = st.session_state.finance_mapping.get(canon)
+                default_guess = None
+                if not persisted:
+                    for c in df.columns:
+                        normc = c.lower().replace(" ","").replace("_","")
+                        if normc in [g.replace("_","") for g in guesses]:
+                            default_guess = c
+                            break
+                options = ["(none)"] + df.columns.tolist()
+                preselect = 0
+                if persisted and persisted in df.columns:
+                    preselect = options.index(persisted)
+                elif default_guess and default_guess in df.columns:
+                    preselect = options.index(default_guess)
+                choice = st.selectbox(
+                    f"Map **{canon}** to:",
+                    options,
+                    index=preselect,
+                    key=f"map_{canon}"
+                )
+                st.session_state.finance_mapping[canon] = None if choice=="(none)" else choice
 
-                if st.button("✅ Confirm Finance Mapping"):
-                    st.session_state.mapping_confirmed = True
-                    try:
-                        MAPPING_STORE.write_text(json.dumps(st.session_state.finance_mapping, indent=2))
-                        st.success("Mapping saved for future sessions.")
-                    except Exception as e:
-                        st.warning(f"Could not persist mapping: {e}")
+            if st.button("✅ Confirm Finance Mapping"):
+                st.session_state.mapping_confirmed = True
+                try:
+                    MAPPING_STORE.write_text(json.dumps(st.session_state.finance_mapping, indent=2))
+                    st.success("Mapping saved for future sessions.")
+                except Exception as e:
+                    st.warning(f"Could not persist mapping: {e}")
 
-        except Exception as e:
-            st.error(f"Error loading file: {e}")
-    elif uploaded_file is not None and not api_key:
-        st.warning("⚠️ Please enter your OpenAI API Key first")
+# =========================
+# Header
+# =========================
+st.markdown('<h1 class="main-header">Grothko Consulting Business Intelligence Generator</h1>', unsafe_allow_html=True)
 
-# ============== Header ==============
-st.markdown('<h1 class="main-header">Grothko Consulting - Percipient Finance Insights</h1>', unsafe_allow_html=True)
-
-# ============== Page Routing (fixed) ==============
+# =========================
+# Page Routing
+# =========================
 page = st.session_state.get("page", "Dashboard")
 
 # ---- Dashboard ----
@@ -1029,19 +1137,13 @@ if page == "Dashboard":
         st.subheader("🗃️ Data Preview"); st.dataframe(df.head(10), use_container_width=True)
         st.subheader("💡 Quick Statistics"); st.dataframe(df.describe(), use_container_width=True)
     else:
-        st.info("👈 Please upload a dataset to get started.")
-        st.markdown("""
-        ### Getting Started
-        1. API key is launch-ready 🚀️
-        3. Upload your CSV file 
-        4. Explore AI-powered insights!
-        """)
+        st.info("👈 Upload one or more CSVs in the sidebar (plus an optional Budget CSV) to get started.")
 
-# ---- Finance KPIs (includes Suggestions 1-4 UIs) ----
+# ---- Finance KPIs ----
 elif page == "Finance KPIs":
     st.header("💼 Finance KPIs")
     if not st.session_state.data_loaded:
-        st.warning("Upload a dataset first.")
+        st.warning("Upload at least one dataset first.")
     elif not st.session_state.mapping_confirmed:
         st.info("Open the sidebar ➜ Finance Field Mapping and click **Confirm** to enable calculations.")
     else:
@@ -1071,7 +1173,7 @@ elif page == "Finance KPIs":
         with colB:
             st.metric("Gross Margin %", f"{gm_pct:.1f}%" if gm_pct is not None else "—")
 
-        # Contribution by customer/product if mapped
+        # Contribution by
         by_choice = st.selectbox("Contribution margin by:", ["(none)","customer_id","sku"])
         if by_choice != "(none)" and _col(by_choice) in st.session_state.df.columns:
             cm = contribution_margin_by(df, _col(by_choice))
@@ -1091,25 +1193,13 @@ elif page == "Finance KPIs":
             st.subheader("Vendor Concentration (Pareto)")
             st.dataframe(pd.DataFrame({"AP_Amount": s, "Cum%": s_pct}).head(25))
             try:
-                # simple rank-based chart
                 fig = px.line(pd.DataFrame({"rank": range(1, len(s_pct)+1), "cum_pct": s_pct.values}),
                               x="rank", y="cum_pct", title="Vendor Pareto (cum%)")
                 st.plotly_chart(fig, use_container_width=True)
             except Exception:
                 pass
 
-        st.divider()
-        # SaaS quick stats
-        saas = churn_and_retention(df)
-        if saas:
-            st.subheader("SaaS Retention (basic)")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Logos", saas["logos"])
-            col2.metric("Churned", saas["churned"])
-            col3.metric("GRR %", f"{saas['GRR_pct']:.1f}%")
-            st.caption("Cohorts and NRR below if mapped fields exist.")
-
-        # ---------- Suggestion (1): 13-week cash ----------
+        # ---------- 13-Week Cash (patched) ----------
         st.divider()
         st.subheader("🗓️ 13-Week Cash View")
         oc = st.number_input("Opening Cash (starting point)", value=0.0, step=1000.0)
@@ -1131,7 +1221,7 @@ elif page == "Finance KPIs":
             else:
                 st.success("No low-cash weeks flagged.")
 
-        # ---------- Suggestion (2): BvA ----------
+        # ---------- BvA ----------
         st.divider()
         st.subheader("📊 Budget vs. Actuals")
         if st.session_state.budget_df is None:
@@ -1150,7 +1240,7 @@ elif page == "Finance KPIs":
                 st.markdown("**Forecast error metrics (lower is better):**")
                 st.dataframe(forecast_error_metrics(bva))
 
-        # ---------- Suggestion (3): PVM ----------
+        # ---------- PVM ----------
         st.divider()
         st.subheader("💸 Price-Volume-Mix Waterfall")
         per_col = _col("period")
@@ -1174,9 +1264,9 @@ elif page == "Finance KPIs":
         else:
             st.caption("Map or derive 'period' to enable PVM.")
 
-        # ---------- Suggestion (4): Cohorts & NRR ----------
+        # ---------- Cohorts & NRR ----------
         st.divider()
-        st.subheader("🧩 SaaS Cohorts & NRR")
+        st.subheader("🧩 Cohorts & NRR (Contracts)")
         cohort, nrr_tbl, err = cohort_table_nrr(df)
         if err:
             st.caption(f"Note: {err}")
@@ -1248,14 +1338,13 @@ elif page == "AI Assistant":
     st.header("🧬 AI Assistant")
     api_key = get_openai_api_key()
     if st.session_state.data_loaded and api_key and st.session_state.retriever and st.session_state.llm:
-        st.info("💡 Ask questions about your data. I can compute correlations, conditional averages, top insights, and basic trends.")
+        st.info("💡 Ask questions about your data. I can compute correlation matrices, per-department correlations, conditional averages, quick insights, and trends.")
         for m in st.session_state.chat_history:
             with st.chat_message(m["role"]): st.write(m["content"])
         user_question = st.chat_input("Ask a question about your data...")
         if user_question:
             st.session_state.chat_history.append({"role":"user","content":user_question})
             with st.chat_message("user"): st.write(user_question)
-            # NOTE: ensure your handle_analytics_query is defined (see placeholder above)
             try:
                 handled, msg = handle_analytics_query(user_question, st.session_state.df)
             except NameError:
@@ -1332,11 +1421,12 @@ elif page == "Visualizations":
     else:
         st.warning("Please upload a dataset first.")
 
-# ============== Footer ==============
+# =========================
+# Footer
+# =========================
 st.divider()
 st.markdown("""
 <div style='text-align: center; color: #666;'>
-    <p>Grothko Consulting Percipient Finance AI Assistant</p>
+    <p>Grothko Consulting B.I.G - Business Intelligence Generator</p>
 </div>
 """, unsafe_allow_html=True)
-

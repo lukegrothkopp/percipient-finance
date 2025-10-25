@@ -24,7 +24,7 @@ def page_icon_value():
     return str(LOGO_PATH) if LOGO_PATH.exists() else "📈"
 
 st.set_page_config(
-    page_title="Grothko Consulting's Business Intelligence Generator (BIG)",
+    page_title="Grothko Consulting's Percipipent Finance Insights",
     page_icon=page_icon_value(),
     layout="wide",
     initial_sidebar_state="expanded"
@@ -1111,7 +1111,7 @@ with st.sidebar:
 # =========================
 # Header
 # =========================
-st.markdown('<h1 class="main-header">Grothko Consulting Business Intelligence Generator</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">Grothko Consulting Percipient AI Financial Analyst</h1>', unsafe_allow_html=True)
 
 # =========================
 # Page Routing
@@ -1427,6 +1427,6 @@ elif page == "Visualizations":
 st.divider()
 st.markdown("""
 <div style='text-align: center; color: #666;'>
-    <p>Grothko Consulting B.I.G - Business Intelligence Generator</p>
+    <p>Grothko Consulting Percipipent Finance</p>
 </div>
 """, unsafe_allow_html=True)

@@ -411,50 +411,115 @@ def handle_analytics_query(question: str, df: pd.DataFrame):
     Detect and execute common analytics directly on the dataframe.
     Returns (handled: bool, message: str).
     """
-    q=question.lower().strip()
+    q = question.lower().strip()
 
-    # --- Correlation between X and Y ---
-    m=re.search(r'correlat\w*\s+.*\bbetween\b\s+(.+?)\s+\b(and|&)\b\s+(.+)', q)
-    if m:
-        raw_x=m.group(1); raw_y=m.group(3)
-        col_x=_find_col(df, raw_x); col_y=_find_col(df, raw_y)
-        if not col_x or not col_y:
-            return True, (f"I couldn't match both columns.\nMatched X: `{col_x or 'None'}` | "
-                          f"Matched Y: `{col_y or 'None'}`.\nColumns: {list(df.columns)}")
-        x=pd.to_numeric(df[col_x], errors='coerce'); y=pd.to_numeric(df[col_y], errors='coerce')
-        valid=x.notna() & y.notna()
-        if valid.sum()<3:
-            return True, f"Not enough overlapping numeric values to compute correlation between `{col_x}` and `{col_y}`."
-        r=x[valid].corr(y[valid], method='pearson')
-        msg=f"**Pearson r** between `{col_x}` and `{col_y}`: **{r:.3f}** (n={valid.sum()})"
-        st.write(msg)
+    # -------- New: "correlation matrix" on numeric columns --------
+    if "correlation matrix" in q or "corr matrix" in q or re.search(r"\bheat\s*map\b.*corr", q):
+        num_df = df.select_dtypes(include=[np.number])
+        if num_df.shape[1] < 2:
+            return True, "I don't have at least two numeric columns to compute a correlation matrix."
+        corr = num_df.corr()
         try:
-            fig=px.scatter(pd.DataFrame({col_x:x[valid], col_y:y[valid]}), x=col_x, y=col_y,
-                           title=f"Scatter: {col_x} vs {col_y}")
+            fig = px.imshow(corr, text_auto=True, aspect="auto",
+                            title="Correlation Matrix (numeric columns)",
+                            color_continuous_scale='RdBu')
             st.plotly_chart(fig, use_container_width=True)
-        except Exception: pass
+        except Exception:
+            pass
+        return True, f"Computed a correlation matrix across {num_df.shape[1]} numeric columns."
+
+    # -------- New: hours vs labor_cost by department --------
+    if ("hours" in q and ("labor" in q or "labour" in q)) and ("department" in q or "across" in q):
+        # Resolve columns via your fuzzy matcher
+        hours_col = _find_col(df, "hours")
+        labor_col = _find_col(df, "labor_cost") or _find_col(df, "labour_cost")
+        dept_col  = _find_col(df, "department")
+        missing = [name for name, col in [("hours", hours_col), ("labor_cost", labor_col), ("department", dept_col)] if not col or col not in df.columns]
+        if missing:
+            msg = ("I couldn't find the required columns: " + ", ".join(missing) +
+                   ". For this analysis, load the staffing file (e.g., 'staffing_payroll_events.csv') "
+                   "so I can use columns: hours, labor_cost, department.")
+            return True, msg
+
+        # Overall Pearson
+        x = pd.to_numeric(df[hours_col], errors='coerce')
+        y = pd.to_numeric(df[labor_col], errors='coerce')
+        valid = x.notna() & y.notna()
+        overall = x[valid].corr(y[valid], method='pearson') if valid.sum() >= 3 else np.nan
+
+        # By department
+        out_rows = []
+        for dept, g in df.loc[valid, [dept_col, hours_col, labor_col]].groupby(dept_col):
+            gx = pd.to_numeric(g[hours_col], errors='coerce')
+            gy = pd.to_numeric(g[labor_col], errors='coerce')
+            mask = gx.notna() & gy.notna()
+            r = gx[mask].corr(gy[mask], method='pearson') if mask.sum() >= 3 else np.nan
+            out_rows.append({"department": dept, "n": int(mask.sum()), "pearson_r": r})
+
+        res = pd.DataFrame(out_rows).sort_values(["n","pearson_r"], ascending=[False, False])
+        st.subheader("Hours vs Labor Cost — Department Correlations")
+        st.dataframe(res)
+
+        # Quick scatter for top department (if enough points)
+        try:
+            top = res.dropna(subset=["pearson_r"]).head(1)
+            if not top.empty:
+                top_dept = top.iloc[0]["department"]
+                g = df[(df[dept_col] == top_dept) & valid]
+                fig = px.scatter(g, x=hours_col, y=labor_col, title=f"Scatter: {hours_col} vs {labor_col} — {top_dept}")
+                st.plotly_chart(fig, use_container_width=True)
+        except Exception:
+            pass
+
+        msg = (f"Overall Pearson r between **{hours_col}** and **{labor_col}**: "
+               f"**{overall:.3f}**" if pd.notna(overall) else
+               "Not enough overlapping numeric values to compute overall correlation.")
         return True, msg
 
-    # --- Explicit Pearson request ---
-    m2=re.search(r'(pearson|corr(?!elation)\b).*?(between|for)\s+[\'"]?([\w %_]+)[\'"]?\s+(and|,)\s+[\'"]?([\w %_]+)[\'"]?', q)
-    if m2:
-        raw_x=m2.group(3); raw_y=m2.group(5)
-        col_x=_find_col(df, raw_x); col_y=_find_col(df, raw_y)
+    # -------- Existing: correlation between X and Y --------
+    m = re.search(r'correlat\w*\s+.*\bbetween\b\s+(.+?)\s+\b(and|&)\b\s+(.+)', q)
+    if m:
+        raw_x = m.group(1); raw_y = m.group(3)
+        col_x = _find_col(df, raw_x); col_y = _find_col(df, raw_y)
         if not col_x or not col_y:
             return True, (f"I couldn't match both columns.\nMatched X: `{col_x or 'None'}` | "
                           f"Matched Y: `{col_y or 'None'}`.\nColumns: {list(df.columns)}")
-        x=pd.to_numeric(df[col_x], errors='coerce'); y=pd.to_numeric(df[col_y], errors='coerce')
-        valid=x.notna() & y.notna()
-        if valid.sum()<3:
+        x = pd.to_numeric(df[col_x], errors='coerce'); y = pd.to_numeric(df[col_y], errors='coerce')
+        valid = x.notna() & y.notna()
+        if valid.sum() < 3:
             return True, f"Not enough overlapping numeric values to compute correlation between `{col_x}` and `{col_y}`."
-        r=x[valid].corr(y[valid], method='pearson')
-        msg=f"**Pearson r** between `{col_x}` and `{col_y}`: **{r:.3f}** (n={valid.sum()})"
+        r = x[valid].corr(y[valid], method='pearson')
+        msg = f"**Pearson r** between `{col_x}` and `{col_y}`: **{r:.3f}** (n={valid.sum()})"
         st.write(msg)
         try:
-            fig=px.scatter(pd.DataFrame({col_x:x[valid], col_y:y[valid]}), x=col_x, y=col_y,
-                           title=f"Scatter: {col_x} vs {col_y}")
+            fig = px.scatter(pd.DataFrame({col_x:x[valid], col_y:y[valid]}), x=col_x, y=col_y,
+                             title=f"Scatter: {col_x} vs {col_y}")
             st.plotly_chart(fig, use_container_width=True)
-        except Exception: pass
+        except Exception:
+            pass
+        return True, msg
+
+    # -------- Existing explicit Pearson pattern --------
+    m2 = re.search(r'(pearson|corr(?!elation)\b).*?(between|for)\s+[\'"]?([\w %_]+)[\'"]?\s+(and|,)\s+[\'"]?([\w %_]+)[\'"]?', q)
+    if m2:
+        raw_x = m2.group(3); raw_y = m2.group(5)
+        col_x = _find_col(df, raw_x); col_y = _find_col(df, raw_y)
+        if not col_x or not col_y:
+            return True, (f"I couldn't match both columns.\nMatched X: `{col_x or 'None'}` | "
+                          f"Matched Y: `{col_y or 'None'}`.\nColumns: {list(df.columns)}")
+        x = pd.to_numeric(df[col_x], errors='coerce'); y = pd.to_numeric(df[col_y], errors='coerce')
+        valid = x.notna() & y.notna()
+        if valid.sum() < 3:
+            return True, f"Not enough overlapping numeric values to compute correlation between `{col_x}` and `{col_y}`."
+        r = x[valid].corr(y[valid], method='pearson')
+        msg = f"**Pearson r** between `{col_x}` and `{col_y}`: **{r:.3f}** (n={valid.sum()})"
+        st.write(msg)
+        try:
+            fig = px.scatter(pd.DataFrame({col_x:x[valid], col_y:y[valid]}), x=col_x, y=col_y,
+                             title=f"Scatter: {col_x} vs {col_y}")
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception:
+            pass
         return True, msg
 
     # --- Conditional average/mean: natural language friendly ---
